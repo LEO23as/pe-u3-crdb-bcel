@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+node_modules/
+cockroach-data/
+crdb-data*/
+*.aux
+*.log
+*.out
+*.bbl
+*.bcf
+*.blg
+*.synctex.gz
+.DS_Store

@@ -1,0 +1,65 @@
+services:
+  crdb-node1:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: crdb-node1
+    hostname: crdb-node1
+    command: start --insecure --join=crdb-node1:26257,crdb-node2:26257,crdb-node3:26257 --advertise-addr=crdb-node1:26257
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+    volumes:
+      - crdb-data1:/cockroach/cockroach-data
+    networks:
+      - roach-net
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "cockroach node status --insecure --host=localhost:26257 > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+  crdb-node2:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: crdb-node2
+    hostname: crdb-node2
+    command: start --insecure --join=crdb-node1:26257,crdb-node2:26257,crdb-node3:26257 --advertise-addr=crdb-node2:26257
+    ports:
+      - "26258:26257"
+      - "8081:8080"
+    volumes:
+      - crdb-data2:/cockroach/cockroach-data
+    networks:
+      - roach-net
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "cockroach node status --insecure --host=localhost:26257 > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+  crdb-node3:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: crdb-node3
+    hostname: crdb-node3
+    command: start --insecure --join=crdb-node1:26257,crdb-node2:26257,crdb-node3:26257 --advertise-addr=crdb-node3:26257
+    ports:
+      - "26259:26257"
+      - "8082:8080"
+    volumes:
+      - crdb-data3:/cockroach/cockroach-data
+    networks:
+      - roach-net
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "cockroach node status --insecure --host=localhost:26257 > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+networks:
+  roach-net:
+    driver: bridge
+volumes:
+  crdb-data1:
+  crdb-data2:
+  crdb-data3:
