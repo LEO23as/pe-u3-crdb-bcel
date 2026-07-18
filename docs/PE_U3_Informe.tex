@@ -1,0 +1,288 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=black, citecolor=black, urlcolor=blue}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usepackage[backend=biber,style=ieee]{biblatex}
+\addbibresource{references.bib}
+
+\sloppy
+
+% El paquete listings no incluye YAML como lenguaje nativo (ni en su version
+% mas reciente), por lo que se define manualmente para poder usar language=yaml.
+\lstdefinelanguage{yaml}{
+  keywords={version, services, image, container_name, hostname, command, start,
+            insecure, join, advertise-addr, ports, volumes, networks, driver,
+            bridge, mem_limit, healthcheck, test, interval, timeout, retries,
+            start_period},
+  sensitive=false,
+  comment=[l]{\#},
+  morestring=[b]"
+}
+
+\lstdefinestyle{yamlstyle}{
+  language=yaml,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{orange!70!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  frame=single,
+  breaklines=true,
+  showstringspaces=false
+}
+
+\title{\textbf{PE-U3: Implementación y Verificación de un Clúster de Base de Datos\\
+Distribuida con CockroachDB aplicado al PFC BCEL}}
+\author{
+Bedón Viteri Keyla Betzabé \\
+Castro López Pedro Leonardo \\
+Emanuel Pino Juliana Romina \\
+Vinueza Sánchez Harold Nicolás
+}
+\date{Aplicaciones Distribuidas (ISR-701) --- Período 2026--2027 PPA \\ Universidad Técnica Estatal de Quevedo}
+
+\begin{document}
+
+\maketitle
+
+\noindent\textbf{PFC de referencia:} BCEL -- SGA Escuela de Educación Básica ``Provincias Unidas''.
+
+\noindent\textbf{Repositorio:} \url{https://github.com/LEO23as/pe-u3-crdb-bcel}
+
+\bigskip
+\noindent\textbf{Justificación de la elección del PFC}
+
+El equipo selecciona el PFC \textbf{BCEL -- SGA Escuela de Educación Básica
+``Provincias Unidas''} como dominio de referencia. Este sistema resulta idóneo para
+ejercitar fragmentación y replicación en un clúster de tres nodos por tres razones
+concretas. En primer lugar, sus datos crecen de forma natural por año lectivo, lo que
+ofrece una clave de partición horizontal clara (\texttt{id\_ano\_lectivo}) sobre la
+tabla principal de matrículas. En segundo lugar, la institución opera en una zona
+rural con conectividad inestable, de modo que la tolerancia a fallos y la replicación
+automática de CockroachDB aportan un valor directo al dominio. En tercer lugar, el
+volumen de matrículas, calificaciones y actividades académicas justifica distribuir
+la carga entre varios nodos para mejorar la disponibilidad y el rendimiento de
+lectura, evidenciando así las ventajas prácticas de una base de datos distribuida
+frente a una arquitectura centralizada.
+
+\tableofcontents
+\newpage
+
+\section{Fundamento teórico}
+
+\subsection{Fundamentos y arquitecturas de bases de datos distribuidas}
+
+Una base de datos distribuida (BDD) puede definirse formalmente como una colección de
+múltiples bases de datos lógicamente interrelacionadas entre sí, pero distribuidas
+físicamente a lo largo de un sistema de computación en red. Su gestión recae en un
+sistema de gestión de bases de datos distribuidas (SGBD-D), cuya función principal es
+hacer que esa distribución resulte transparente para quien la consulta
+\cite{ozsu2020,kleppmann2017}. Conviene distinguir este concepto de una base de datos
+centralizada replicada en un único servidor: en la BDD, los datos residen físicamente
+en distintos nodos autónomos, que cooperan para responder a consultas globales como si
+constituyeran un único sistema lógico.
+
+Para orientar el diseño de estos sistemas, C. J. Date propuso doce objetivos que un
+SGBD-D debería satisfacer en su forma ideal: independencia de localización,
+independencia de fragmentación, independencia de replicación, procesamiento
+distribuido de consultas, gestión distribuida de transacciones, e independencia
+respecto al hardware, al sistema operativo, a la red y al SGBD local subyacente, entre
+otros. A estos se suman las transparencias de esquema, de catálogo y de actualización.
+En conjunto, estos doce objetivos persiguen que quien usa el sistema perciba un
+comportamiento equivalente al de una base de datos centralizada, sin necesidad de
+conocer cómo están repartidos los datos entre los nodos \cite{ozsu2020}.
+
+En cuanto a las arquitecturas de referencia, la literatura reconoce tres modelos
+principales. La arquitectura \emph{cliente-servidor} concentra el procesamiento en
+servidores dedicados, mientras los clientes se limitan a formular solicitudes; resulta
+sencilla de implementar, pero su escalabilidad horizontal es limitada porque el
+servidor termina siendo un cuello de botella. La arquitectura \emph{colaborativa}
+(peer-to-peer) elimina esa distinción: cada nodo puede comportarse simultáneamente
+como proveedor y como consumidor de datos, lo que favorece la disponibilidad general
+del sistema. Por último, la arquitectura \emph{middleware} incorpora una capa
+intermedia que oculta la heterogeneidad de los distintos SGBD locales y coordina la
+resolución de consultas globales; este es, precisamente, el modelo que más se asemeja
+al adoptado por CockroachDB, que expone una única interfaz SQL sobre un conjunto de
+nodos físicamente distribuidos \cite{kleppmann2017}.
+
+La transparencia constituye el principio que sostiene a toda BDD: quien la utiliza
+debe poder operar sobre el sistema sin conocer los detalles de cómo están distribuidos
+sus datos internamente. Se reconocen ocho formas de transparencia. La transparencia de
+\emph{fragmentación} oculta cómo se dividen las tablas; la de \emph{replicación}
+oculta cuántas copias existen de cada dato; la de \emph{ubicación} oculta en qué nodo
+reside físicamente cada fragmento; la de \emph{acceso} permite emplear el mismo
+lenguaje de consulta con independencia del SGBD local; la de \emph{concurrencia}
+asegura que transacciones simultáneas no interfieran entre sí; la de \emph{fallos}
+mantiene el sistema operativo pese a caídas parciales; la de \emph{escalabilidad}
+permite incorporar nuevos nodos sin rediseñar la aplicación; y la de \emph{evolución}
+posibilita modificar el esquema sin afectar a las aplicaciones que ya lo consumen
+\cite{ozsu2020}.
+
+Finalmente, es necesario distinguir entre BDD \emph{homogéneas}, en las que todos los
+nodos ejecutan el mismo SGBD y comparten idéntico modelo de datos, y BDD
+\emph{heterogéneas}, en las que coexisten distintos motores y modelos que requieren
+capas de traducción adicionales \cite{kleppmann2017}. El clúster implementado en esta
+práctica para el PFC BCEL corresponde a una BDD homogénea: los tres nodos ejecutan la
+misma versión de CockroachDB y comparten idéntico esquema de estudiantes, matrículas,
+actividades y calificaciones. Esta homogeneidad simplifica considerablemente tanto la
+fragmentación horizontal aplicada por año lectivo como la replicación automática de
+rangos que el propio motor gestiona entre nodos.
+
+\subsection{Fragmentación y replicación de datos}
+% TODO (Pedro): Teoria 5.2
+
+\subsection{Control de concurrencia distribuido y consenso}
+% TODO (Juliana): Teoria 5.3
+
+\subsection{Consistencia, disponibilidad, PACELC y NoSQL}
+% TODO (Keyla): Teoria 5.4
+
+\section{Procedimiento aplicado}
+
+\subsection{Levantamiento del clúster CockroachDB (Harold)}
+
+El clúster se define mediante el siguiente archivo \texttt{docker-compose.yml}, que
+configura tres nodos CockroachDB interconectados por la red \texttt{roach-net} de tipo
+\emph{bridge}, cada uno con un volumen persistente y un límite de memoria de 512\,MB:
+
+\begin{lstlisting}[style=yamlstyle, caption={Configuración del clúster CockroachDB de tres nodos}, label={lst:compose}]
+services:
+  crdb-node1:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: crdb-node1
+    command: start --insecure --join=crdb-node1:26257,crdb-node2:26257,crdb-node3:26257 --advertise-addr=crdb-node1:26257
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+    volumes:
+      - crdb-data1:/cockroach/cockroach-data
+    networks:
+      - roach-net
+    mem_limit: 512m
+  crdb-node2:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: crdb-node2
+    command: start --insecure --join=crdb-node1:26257,crdb-node2:26257,crdb-node3:26257 --advertise-addr=crdb-node2:26257
+    ports:
+      - "26258:26257"
+      - "8081:8080"
+    volumes:
+      - crdb-data2:/cockroach/cockroach-data
+    networks:
+      - roach-net
+    mem_limit: 512m
+  crdb-node3:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: crdb-node3
+    command: start --insecure --join=crdb-node1:26257,crdb-node2:26257,crdb-node3:26257 --advertise-addr=crdb-node3:26257
+    ports:
+      - "26259:26257"
+      - "8082:8080"
+    volumes:
+      - crdb-data3:/cockroach/cockroach-data
+    networks:
+      - roach-net
+    mem_limit: 512m
+networks:
+  roach-net:
+    driver: bridge
+volumes:
+  crdb-data1:
+  crdb-data2:
+  crdb-data3:
+\end{lstlisting}
+
+El clúster se inicializó desde el primer nodo con \texttt{docker exec -it crdb-node1
+cockroach init --insecure}, y su estado se verificó con \texttt{cockroach node status
+--insecure}, confirmando que los tres nodos reportaban \texttt{is\_live=true}. La
+Figura~\ref{fig:dashboard} muestra el panel de administración web con los tres nodos
+activos.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{../evidencia/dashboard.png}
+  \caption{Dashboard de CockroachDB mostrando los tres nodos del clúster en estado activo (\texttt{LIVE}).}
+  \label{fig:dashboard}
+\end{figure}
+
+\section{Preguntas de análisis}
+
+\subsection*{Pregunta 4}
+
+\textbf{Pregunta 4.} Cuando el SGA requiere una transacción que abarca varias tablas
+ubicadas en distintos nodos ---por ejemplo, registrar una matrícula y sus
+calificaciones asociadas---, CockroachDB garantiza la atomicidad mediante un
+protocolo de \emph{commit} distribuido apoyado en el consenso Raft
+\cite{ongaro2014,taft2020}. Cada transacción crea un \emph{registro de transacción}
+(\emph{transaction record}) cuyo estado --PENDING, COMMITTED o ABORTED-- actúa como
+punto único de verdad sobre el desenlace de la operación. Durante la escritura, el
+sistema deposita \emph{write intents} (intenciones de escritura) provisionales en cada
+rango afectado; estas intenciones son visibles pero aún no confirmadas. Cada rango de
+datos está replicado en varios nodos, y toda modificación se acuerda mediante consenso
+Raft, de modo que una escritura solo se considera durable cuando la mayoría --el
+quórum-- de sus réplicas la ha registrado en su log. El commit se vuelve atómico en el
+instante en que el estado del registro de transacción cambia a COMMITTED: ese cambio
+constituye, a su vez, una escritura acordada por Raft, por lo que ocurre de forma
+indivisible y sobrevive a fallos de nodos individuales. CockroachDB optimiza este
+flujo mediante \emph{Parallel Commits}, que paraleliza la confirmación de las
+intenciones y del registro de transacción para reducir la latencia percibida. Si un
+nodo cae antes de confirmar su parte de la transacción, las intenciones quedan
+pendientes y una transacción posterior las resuelve consultando el registro de
+transacción, garantizando así que la operación se aplique por completo o no se aplique
+en absoluto, nunca de forma parcial \cite{taft2020}.
+
+\section{Conclusiones}
+
+\subsection*{Conclusión individual --- Vinueza Sánchez Harold Nicolás}
+
+Esta práctica me permitió comprender que la teoría de bases de datos distribuidas deja
+de ser abstracta en cuanto se intenta levantar un clúster real. Configurar los tres
+nodos de CockroachDB con \texttt{docker-compose} me obligó a resolver, uno por uno,
+problemas que en la definición de ``transparencia de ubicación'' se dan por sentados:
+decidir cómo se comunican los nodos entre sí a través de la red \texttt{roach-net},
+mapear correctamente los puertos internos del contenedor a los del host sin generar
+conflictos, y limitar la memoria de cada nodo para que el clúster pudiera correr sin
+saturar el equipo. Ver que los tres nodos reportaran \texttt{is\_live=true} después de
+la inicialización con Raft fue, en la práctica, la primera evidencia tangible de que
+un sistema distribuido puede tolerar variaciones internas sin que el usuario final
+perciba ninguna interrupción.
+
+Redactar la fundamentación teórica de la Sección 5.1 también cambió la forma en que
+entiendo la arquitectura del propio SGA que manejamos como PFC: reconocer que nuestro
+clúster es una BDD homogénea, en la que los tres nodos comparten el mismo motor y
+esquema, ayuda a explicar por qué la fragmentación horizontal por año lectivo es una
+decisión de diseño razonable y no solo un requisito de la guía. De igual manera,
+estudiar cómo CockroachDB resuelve la atomicidad de transacciones multi-nodo mediante
+Raft y los \emph{write intents} me dejó una idea más clara de por qué los sistemas
+distribuidos modernos prefieren el consenso por mayoría antes que protocolos rígidos
+como el 2PC clásico. En conjunto, esta práctica reforzó mi criterio para diferenciar
+entre lo que un motor de base de datos promete en su documentación y lo que realmente
+se puede verificar con evidencia propia, como el estado de los nodos o el dashboard de
+administración.
+
+\section{Declaración de uso de inteligencia artificial generativa}
+
+Se utilizó la herramienta Claude (Anthropic) como apoyo en la redacción de la
+Sección~5.1 (Fundamentos y arquitecturas de bases de datos distribuidas), en la
+respuesta a la Pregunta de análisis~4, en la verificación de los DOI de las
+referencias bibliográficas citadas, y en la revisión de la estructura y compilación
+del presente documento LaTeX. El contenido técnico fue ejecutado, verificado y
+validado directamente por el autor mediante la implementación real del clúster
+CockroachDB descrito en la Sección~2.
+
+\printbibliography
+
+\end{document}
