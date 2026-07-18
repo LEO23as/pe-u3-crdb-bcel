@@ -1,14 +1,18 @@
-
+"""
+PE-U3 | Equipo BCEL | Benchmark: clúster (3 nodos) vs nodo único
+Requisitos: pip install psycopg2-binary pandas matplotlib
+Uso:  python scripts/run_benchmark.py
+"""
 import time
 import psycopg2
 import pandas as pd
 import matplotlib.pyplot as plt
 
-
+# Conexiones: clúster (nodo1) y nodo único (levantado en otro puerto)
 DSN_CLUSTER = "postgresql://root@localhost:26257/sga_dist?sslmode=disable"
 DSN_SINGLE  = "postgresql://root@localhost:26260/sga_dist?sslmode=disable"
 
-REPETICIONES = 10  
+REPETICIONES = 10  # promedio de 10 corridas por consulta
 
 CONSULTAS = {
     "Q1 JOIN": "SELECT e.nombres, m.estado FROM estudiantes e JOIN matriculas m ON e.id_estudiante = m.id_estudiante LIMIT 100;",
@@ -49,7 +53,7 @@ def main():
     df.to_csv("evidencia/resultados.csv", index=False)
     print(df.to_string(index=False))
 
-   
+    # Gráfica comparativa
     df.plot(x="Consulta", y=["Cluster_ms", "NodoUnico_ms"], kind="bar")
     plt.ylabel("Tiempo (ms)"); plt.title("Rendimiento: Clúster vs Nodo Único")
     plt.tight_layout(); plt.savefig("evidencia/benchmark.png")

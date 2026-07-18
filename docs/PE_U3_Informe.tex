@@ -83,6 +83,12 @@ frente a una arquitectura centralizada.
 
 \section{Fundamento teórico}
 
+En esta sección se describen los pilares teóricos y conceptuales que sustentan el diseño, la implementación y la evaluación del 
+Sistema de Gestión Académica (SGA) distribuido. A través de un desglose estructurado, se abordan desde las arquitecturas fundamentales 
+de los sistemas de bases de datos distribuidas hasta las estrategias de fragmentación horizontal. Asimismo, se analizan los mecanismos 
+de control de concurrencia y los modelos de consistencia bajo el teorema CAP y el modelo PACELC, justificando la elección de NewSQL 
+sobre las soluciones tradicionales.
+
 \subsection{Fundamentos y arquitecturas de bases de datos distribuidas}
 
 Una base de datos distribuida (BDD) puede definirse formalmente como una colección de
@@ -145,10 +151,111 @@ rangos que el propio motor gestiona entre nodos.
 % TODO (Pedro): Teoria 5.2
 
 \subsection{Control de concurrencia distribuido y consenso}
-% TODO (Juliana): Teoria 5.3
+En una base de datos distribuida, múltiples transacciones concurrentes pueden acceder
+a los mismos datos replicados en distintos nodos, lo que puede producir anomalías como
+lecturas sucias o actualizaciones perdidas si no existe un mecanismo de control
+\cite{ozsu2020}. El protocolo de bloqueo en dos fases (2PL) resuelve este problema
+exigiendo que toda transacción adquiera sus bloqueos en una fase de crecimiento y los
+libere en una fase de reducción, sin volver a adquirir ninguno. Su variante estricta
+(S2PL) mantiene los bloqueos exclusivos hasta el \emph{commit}, garantizando
+seriabilidad y recuperabilidad. En el entorno distribuido, los bloqueos se coordinan
+entre los nodos que albergan cada fragmento.
+
+El bloqueo introduce el riesgo de interbloqueo (deadlock). Su detección distribuida se
+realiza construyendo grafos de espera (wait-for graphs) locales que luego se combinan;
+un ciclo en el grafo global indica un deadlock, que se resuelve abortando una de las
+transacciones implicadas \cite{ozsu2020}.
+
+Para garantizar la atomicidad de una transacción que abarca varios nodos se emplea el
+protocolo de commit en dos fases (2PC): un coordinador envía una fase de preparación y,
+si todos los participantes responden afirmativamente, ordena el commit definitivo. Su
+debilidad es el bloqueo si el coordinador falla tras la preparación; el protocolo 3PC
+añade una fase intermedia para reducir ese bloqueo, a costa de más mensajes
+\cite{vansteen2023}.
+
+Los sistemas modernos como CockroachDB sustituyen la fragilidad del 2PC clásico por el
+algoritmo de consenso \textbf{Raft} \cite{ongaro2014}. Raft elige un líder por cada
+grupo de réplicas (rango); el líder recibe las escrituras, las anexa a un log y las
+replica a los seguidores. Una entrada se considera confirmada (committed) cuando la
+mayoría de las réplicas la ha almacenado, es decir, cuando se alcanza el quórum. Si el
+líder cae, los seguidores inician una elección y eligen uno nuevo, garantizando
+continuidad y seguridad: nunca se pierde una entrada confirmada \cite{taft2020}.
+
+\subsection{Diagrama de secuencia: Raft ante la caída de un nodo}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\footnotesize, >=latex]
+  % Lifelines
+  \foreach \x/\n in {0/Cliente, 3/{Nodo1 (Líder)}, 6.5/{Nodo2 (Seguidor)}, 10/{Nodo3 (Seguidor)}} {
+    \node[draw, fill=blue!10, minimum width=2.2cm] at (\x,0) (\n) {\n};
+    \draw[dashed] (\x,-0.4) -- (\x,-7);
+  }
+  % Mensajes
+  \draw[->] (0,-1) -- node[above]{escritura} (3,-1);
+  \draw[->] (3,-1.8) -- node[above]{append log} (6.5,-1.8);
+  \draw[->] (3,-2.3) -- node[above]{append log} (10,-2.3);
+  \draw[<-] (3,-3) -- node[above]{ack} (6.5,-3);
+  \draw[<-] (3,-3.5) -- node[above]{ack} (10,-3.5);
+  \node[red] at (6.5,-4) {\Large $\times$};
+  \node[red, right] at (6.7,-4) {Nodo2 cae};
+  \draw[->] (3,-4.8) -- node[above]{re-replica (quórum 2/3)} (10,-4.8);
+  \draw[<-] (3,-5.3) -- node[above]{ack} (10,-5.3);
+  \draw[->] (3,-6) -- node[above]{commit} (10,-6);
+  \draw[<-] (0,-6.7) -- node[above]{respuesta OK} (3,-6.7);
+\end{tikzpicture}
+\caption{Comportamiento de Raft durante la caída de un nodo: el líder mantiene el quórum con 2 de 3 réplicas y confirma la escritura sin interrupción.}
+\label{fig:raft}
+\end{figure}
 
 \subsection{Consistencia, disponibilidad, PACELC y NoSQL}
-% TODO (Keyla): Teoria 5.4
+El teorema CAP, formalizado por Gilbert y Lynch \cite{gilbert2002}, establece que ante
+una partición de red un sistema distribuido no puede garantizar simultáneamente
+consistencia y disponibilidad. Brewer \cite{brewer2012} matizó esta lectura años
+después, aclarando que la elección entre C y A solo se impone durante la partición y
+que existen estrategias híbridas. El modelo PACELC de Abadi \cite{abadi2012} completa
+el análisis: además del compromiso bajo partición (PA/PC), añade que en operación
+normal (Else) se decide entre latencia y consistencia (EL/EC), lo que resulta clave
+para bases de datos geo-distribuidas.
+
+La consistencia no es binaria, sino un espectro que va desde la consistencia fuerte
+—donde toda lectura devuelve el último valor escrito— hasta la consistencia eventual
+—donde las réplicas convergen con el tiempo \cite{abadi2012}. CockroachDB se ubica en
+el extremo fuerte: ofrece aislamiento \emph{serializable}, el nivel más estricto,
+apoyándose en Raft y en un protocolo de transacciones distribuidas \cite{taft2020}.
+
+En el ecosistema NoSQL existen varios modelos de datos: documental, clave-valor,
+columnar y de grafos. Dynamo \cite{decandia2007} representa el enfoque clave-valor con
+consistencia eventual y alta disponibilidad (AP), mientras que Spanner \cite{corbett2013}
+ofrece consistencia externa apoyándose en relojes sincronizados. Un análisis
+comparativo en el eje Consistencia/Disponibilidad/Latencia muestra que CockroachDB
+prioriza la consistencia serializable (PC/EC), MongoDB ofrece consistencia ajustable
+inclinada a disponibilidad, y Cassandra adopta consistencia eventual maximizando
+disponibilidad y latencia (PA/EL). Para el dominio del SGA, donde la integridad de
+calificaciones y matrículas es innegociable, el modelo serializable de CockroachDB es
+el más apropiado.
+
+\begin{table}[h]
+\centering
+\caption{Comparación de CockroachDB, MongoDB y Cassandra en el eje C/A/L.}
+\label{tab:nosql}
+\small
+\begin{tabular}{@{}p{3cm}p{3.5cm}p{3.5cm}@{}}
+\toprule
+\textbf{Criterio} & \textbf{CockroachDB} & \textbf{Cassandra} \\
+\midrule
+Modelo & NewSQL (relacional distribuido) & NoSQL columnar \\
+\addlinespace
+Consistencia & Serializable (fuerte) & Eventual (ajustable) \\
+\addlinespace
+Clasificación PACELC & PC/EC & PA/EL \\
+\addlinespace
+Consenso & Raft & Sin líder (quórum) \\
+\addlinespace
+Ideal para & Datos críticos (banca, académico) & Alta escritura, tolerancia a latencia \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Procedimiento aplicado}
 
@@ -220,6 +327,48 @@ activos.
 
 \section{Preguntas de análisis}
 
+\subsection*{Pregunta 1}
+
+\textbf{Pregunta 1.} CockroachDB emplea el algoritmo de consenso Raft para garantizar
+la consistencia de los datos aun cuando un nodo falla \cite{ongaro2014,taft2020}. Cada
+porción de datos (rango) se replica en tres nodos y forma un grupo Raft con un
+\emph{líder} y dos \emph{seguidores}. Todas las escrituras pasan primero por el líder,
+que las anexa a un \emph{log de transacciones} replicado y las envía a los seguidores.
+Una entrada del log solo se considera confirmada cuando la mayoría de las réplicas
+—el \emph{quórum}, es decir, 2 de 3— la ha almacenado de forma durable. Este requisito
+de mayoría es la clave de la tolerancia a fallos: si un nodo cae, todavía quedan dos
+réplicas vivas que forman quórum, por lo que el sistema sigue aceptando lecturas y
+escrituras sin pérdida de datos ni inconsistencias. Si el nodo que falla era el líder,
+los seguidores detectan la ausencia de latidos (heartbeats), incrementan su término y
+celebran una elección para nombrar un nuevo líder; Raft garantiza que solo puede
+elegirse como líder una réplica cuyo log esté al menos tan actualizado como el de la
+mayoría, de modo que ninguna entrada previamente confirmada se pierda. Cuando el nodo
+caído se reincorpora, recibe del líder las entradas del log que le faltan y se
+sincroniza con el grupo. En el SGA, esto implica que la consulta de matrículas siguió
+respondiendo correctamente durante la caída del nodo 2, tal como se evidenció
+experimentalmente.
+
+\subsection*{Pregunta 2}
+
+\textbf{Pregunta 2.} CockroachDB adopta un modelo de consistencia \emph{serializable},
+el nivel de aislamiento más estricto, garantizando que el resultado de transacciones
+concurrentes equivalga a alguna ejecución secuencial \cite{taft2020}. Apache Cassandra,
+en cambio, ofrece por defecto \emph{consistencia eventual}: las réplicas pueden divergir
+temporalmente y convergen con el tiempo, priorizando disponibilidad y baja latencia
+\cite{decandia2007}. La diferencia se explica bien con PACELC \cite{abadi2012}:
+CockroachDB es un sistema PC/EC —sacrifica disponibilidad y latencia para preservar
+consistencia tanto bajo partición como en operación normal—, mientras que Cassandra es
+PA/EL —sacrifica consistencia para maximizar disponibilidad y latencia. Para el PFC
+seleccionado, el SGA de la escuela ``Provincias Unidas'', se elige \textbf{CockroachDB}.
+La razón es que el dominio gestiona calificaciones y matrículas, datos cuya exactitud es
+innegociable: una nota o una matrícula inconsistente tiene consecuencias administrativas
+y legales reales. Además, la carga concurrente es baja (alrededor de veinte usuarios),
+por lo que el costo de coordinación que impone la consistencia fuerte no representa un
+cuello de botella. Cassandra sería preferible en escenarios de escritura masiva y
+tolerancia a inconsistencias temporales —como registro de logs o telemetría—, que no
+corresponden al perfil del SGA. Por tanto, la consistencia serializable de CockroachDB
+ofrece el equilibrio correcto entre integridad y rendimiento para este dominio.
+
 \subsection*{Pregunta 4}
 
 \textbf{Pregunta 4.} Cuando el SGA requiere una transacción que abarca varias tablas
@@ -272,6 +421,42 @@ como el 2PC clásico. En conjunto, esta práctica reforzó mi criterio para dife
 entre lo que un motor de base de datos promete en su documentación y lo que realmente
 se puede verificar con evidencia propia, como el estado de los nodos o el dashboard de
 administración.
+
+\subsection*{Conclusión individual --- Emanuel Pino Juliana Romina}
+
+Esta práctica me permitió comprobar de forma experimental cómo un sistema de bases
+de datos distribuido como CockroachDB mantiene la disponibilidad y la consistencia
+de los datos incluso cuando uno de sus nodos falla. Al detener el nodo 2 y ejecutar
+inmediatamente la misma consulta, verifiqué que el clúster siguió respondiendo
+correctamente gracias al quórum Raft (2 de 3 réplicas), sin pérdida de información
+ni inconsistencias visibles. Esto me hizo entender en la práctica algo que en teoría
+suena abstracto: que la tolerancia a fallos no depende de que todos los nodos estén
+siempre disponibles, sino de que exista una mayoría capaz de confirmar cada
+escritura. También pude observar cómo el sistema redistribuye los rangos de la
+tabla matriculas tras la caída, y cómo, al reintegrarse el nodo caído, este se
+sincroniza automáticamente con el líder para ponerse al día. En conjunto, esta
+práctica reforzó mi comprensión del algoritmo Raft y de por qué arquitecturas como
+esta son preferidas frente a protocolos más frágiles como el 2PC clásico en
+entornos que requieren alta disponibilidad, como sería un sistema de gestión
+académica en producción.
+
+\subsection*{Conclusión individual --- Bedón Viteri Keyla Betzabe}
+
+El análisis comparativo y la ejecución del entorno de pruebas demuestran de manera 
+empírica que la adopción de una arquitectura NewSQL distribuida como CockroachDB 
+introduce un compromiso (\emph{trade-off}) inevitable entre la latencia de las operaciones 
+y la consistencia estricta de los datos. Mientras que un nodo único centralizado elimina 
+la sobrecarga de red y los algoritmos de consenso, resultando en tiempos de respuesta más 
+bajos para consultas de lectura puntuales y operaciones de rango cortas, carece por completo 
+de resiliencia ante fallos y escalabilidad horizontal.
+
+En el contexto del Sistema de Gestión Académica (SGA) para la escuela ``Provincias Unidas'', 
+el sacrificio marginal en la latencia provocado por la coordinación del protocolo Raft y 
+el aislamiento serializable queda plenamente justificado. La integridad innegociable de registros 
+críticos como calificaciones y matrículas estudiantiles imposibilita el uso de modelos de consistencia
+eventual. Así, el rendimiento distribuido provee la alta disponibilidad necesaria para la institución, 
+asegurando transacciones libres de anomalías a cambio de un costo de coordinación perfectamente asumible 
+debido a la baja concurrencia del sistema.
 
 \section{Declaración de uso de inteligencia artificial generativa}
 
