@@ -1,3 +1,80 @@
+
+\documentclass[11pt,a4paper]{article}
+
+% ---------- Paquetes ----------
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[style=ieee]{biblatex}
+\addbibresource{referencias.bib}
+
+\title{PE-U3: Fragmentación y Tolerancia a Fallos en Bases de Datos Distribuidas \\ \large Sistema de Gestión Académica (SGA) sobre CockroachDB}
+\author{Equipo BCEL}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+% NOTA: Aquí el equipo va agregando las demás secciones
+% (introducción, fragmentación, benchmarks, etc.)
+% ============================================================
+
+\section{Prueba de tolerancia a fallos}
+
+\subsection{Control de concurrencia distribuido y consenso}
+
+En una base de datos distribuida, múltiples transacciones concurrentes pueden acceder
+a los mismos datos replicados en distintos nodos, lo que puede producir anomalías como
+lecturas sucias o actualizaciones perdidas si no existe un mecanismo de control
+\cite{ozsu2020}. El protocolo de bloqueo en dos fases (2PL) resuelve este problema
+exigiendo que toda transacción adquiera sus bloqueos en una fase de crecimiento y los
+libere en una fase de reducción, sin volver a adquirir ninguno. Su variante estricta
+(S2PL) mantiene los bloqueos exclusivos hasta el \emph{commit}, garantizando
+seriabilidad y recuperabilidad. En el entorno distribuido, los bloqueos se coordinan
+entre los nodos que albergan cada fragmento.
+
+El bloqueo introduce el riesgo de interbloqueo (deadlock). Su detección distribuida se
+realiza construyendo grafos de espera (wait-for graphs) locales que luego se combinan;
+un ciclo en el grafo global indica un deadlock, que se resuelve abortando una de las
+transacciones implicadas \cite{ozsu2020}.
+
+Para garantizar la atomicidad de una transacción que abarca varios nodos se emplea el
+protocolo de commit en dos fases (2PC): un coordinador envía una fase de preparación y,
+si todos los participantes responden afirmativamente, ordena el commit definitivo. Su
+debilidad es el bloqueo si el coordinador falla tras la preparación; el protocolo 3PC
+añade una fase intermedia para reducir ese bloqueo, a costa de más mensajes
+\cite{vansteen2023,skeen1981}.
+
+Los sistemas modernos como CockroachDB sustituyen la fragilidad del 2PC clásico por el
+algoritmo de consenso \textbf{Raft} \cite{ongaro2014}. Raft elige un líder por cada
+grupo de réplicas (rango); el líder recibe las escrituras, las anexa a un log y las
+replica a los seguidores. Una entrada se considera confirmada (committed) cuando la
+mayoría de las réplicas la ha almacenado, es decir, cuando se alcanza el quórum. Si el
+líder cae, los seguidores inician una elección y eligen uno nuevo, garantizando
+continuidad y seguridad: nunca se pierde una entrada confirmada \cite{taft2020}.
+
+\subsection{Diagrama de secuencia: Raft ante la caída de un nodo}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\footnotesize, >=latex]
+  \foreach \x/\n in {0/Cliente, 3/{Nodo1 (Líder)}, 6.5/{Nodo2 (Seguidor)}, 10/{Nodo3 (Seguidor)}} {
+    \node[draw, fill=blue!10, minimum width=2.2cm] at (\x,0) (\n) {\n};
+    \draw[dashed] (\x,-0.4) -- (\x,-7);
+  }
+  \draw[->] (0,-1) -- node[above]{escritura} (3,-1);
+  \draw[->] (3,-1.8) -- node[above]{append log} (6.5,-1.8);
+  \draw[->] (3,-2.3) -- node[above]{append log} (10,-2.3);
+  \draw[<-] (3,-3) -- node[above]{ack} (6.5,-3);
+  \draw[<-] (3,-3.5) -- node[above]{ack} (10,-3.5);
+  \node[red] at (6.5,-4) {\Large
+=======
 \documentclass[10pt,a4paper]{article}
 
 \usepackage[utf8]{inputenc}
@@ -286,3 +363,4 @@ CockroachDB descrito en la Sección~2.
 \printbibliography
 
 \end{document}
+
