@@ -1,0 +1,14 @@
+Verificacion de estado del cluster CockroachDB (3 nodos)
+Comando ejecutado: docker exec -it crdb-node1 cockroach node status --insecure
+Fecha de ejecucion: 18/07/2026
+
+  id |     address      |   sql_address    |  build   |              started_at              |              updated_at              | locality | is_available | is_live
+-----+------------------+------------------+----------+---------------------------------------+---------------------------------------+----------+--------------+----------
+   1 | crdb-node1:26257 | crdb-node1:26257 | v23.1.11 | 2026-07-18 17:23:47.911353 +0000 UTC | 2026-07-18 17:23:53.980842 +0000 UTC |          | true         | true
+   2 | crdb-node3:26257 | crdb-node3:26257 | v23.1.11 | 2026-07-18 17:23:49.673299 +0000 UTC | 2026-07-18 17:23:55.762938 +0000 UTC |          | true         | true
+   3 | crdb-node2:26257 | crdb-node2:26257 | v23.1.11 | 2026-07-18 17:23:49.717837 +0000 UTC | 2026-07-18 17:23:55.743804 +0000 UTC |          | true         | true
+(3 rows)
+
+Resultado: los 3 nodos del cluster reportan is_available=true e is_live=true,
+confirmando que el cluster CockroachDB de 3 nodos quedo correctamente inicializado
+y en estado saludable tras el comando "cockroach init --insecure".
