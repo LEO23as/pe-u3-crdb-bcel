@@ -12,7 +12,7 @@ from faker import Faker
 fake = Faker("es_ES")
 
 # Conexión al clúster (nodo 1, modo inseguro)
-CONN_STR = "postgresql://root@localhost:26260/sga_dist?sslmode=disable"
+CONN_STR = "postgresql://root@localhost:26257/sga_dist?sslmode=disable"
 
 # Años lectivos para repartir las matrículas (activa la fragmentación por rango)
 ANIOS = [2022, 2023, 2024, 2025, 2026]
