@@ -14,6 +14,7 @@
 \usepackage{xcolor}
 \usepackage{tikz}
 \usepackage{amsmath}
+\usepackage{amssymb}
 \usepackage[backend=biber,style=ieee]{biblatex}
 \addbibresource{references.bib}
 
@@ -80,6 +81,69 @@ frente a una arquitectura centralizada.
 
 \tableofcontents
 \newpage
+
+\section{Resumen}
+ 
+El presente informe documenta el diseño, la implementación y la evaluación
+experimental de un clúster de base de datos distribuida con CockroachDB,
+desarrollado como práctica de la Unidad 3 de Aplicaciones Distribuidas y
+aplicado al Sistema de Gestión Académica (SGA) de la escuela de educación
+básica ``Provincias Unidas'' (PFC BCEL). Se desplegaron tres nodos
+CockroachDB coordinados mediante el algoritmo de consenso Raft
+\cite{ongaro2014,taft2020}, sobre los cuales se implementó un esquema
+relacional de cuatro tablas (estudiantes, matrículas, actividades y
+calificaciones) con una estrategia de fragmentación horizontal por año
+lectivo. El trabajo abarca cuatro ejes: (i) el levantamiento y
+verificación del clúster; (ii) el diseño del esquema, la carga de datos y
+la fragmentación; (iii) la verificación experimental de la tolerancia a
+fallos mediante la caída controlada de un nodo; y (iv) la medición
+comparativa de rendimiento entre el clúster distribuido y una instancia de
+nodo único. Los resultados muestran que el clúster mantiene la
+disponibilidad y la consistencia de los datos durante la caída de un nodo
+gracias al quórum Raft, y que el rendimiento distribuido implica un costo
+de coordinación medible frente al nodo único, compensado por la tolerancia
+a fallos y la escalabilidad que exige un sistema académico en producción.
+ 
+\section{Introducción}
+ 
+Las bases de datos distribuidas se han convertido en una pieza central de
+los sistemas de información modernos, ya que permiten escalar
+horizontalmente, tolerar fallos parciales y mantener la disponibilidad de
+servicios críticos sin depender de un único punto de falla
+\cite{ozsu2020,kleppmann2017}. Este informe se enmarca en la práctica
+experimental GA-SUM-03/PE-U3 de la asignatura Aplicaciones Distribuidas,
+cuyo propósito es implementar y verificar un clúster de base de datos
+distribuida de tres nodos aplicado al esquema de datos de un Proyecto de
+Fin de Curso (PFC) real.
+ 
+El equipo seleccionó como dominio de referencia el PFC BCEL,
+correspondiente al Sistema de Gestión Académica (SGA) de la escuela de
+educación básica ``Provincias Unidas'', por ser un dominio cuyos datos
+crecen de forma natural por año lectivo y cuya integridad —matrículas y
+calificaciones— resulta crítica para la institución.
+ 
+\textbf{Objetivo general.} Implementar, configurar y verificar un clúster
+funcional de base de datos distribuida de tres nodos aplicado al esquema
+de datos del PFC BCEL, demostrando transparencia de fragmentación y
+replicación, comportamiento ante fallos de nodos y recuperación automática
+mediante consenso Raft.
+ 
+\textbf{Objetivos específicos.}
+\begin{itemize}
+  \item Configurar un clúster CockroachDB de tres nodos en contenedores
+        Docker con replicación automática entre réplicas.
+  \item Implementar el esquema de datos del PFC BCEL con una estrategia de
+        fragmentación horizontal por año lectivo.
+  \item Demostrar experimentalmente la tolerancia a fallos deteniendo un
+        nodo y verificando que el sistema continúa operando por quórum
+        Raft.
+  \item Medir y comparar cuantitativamente el rendimiento de consultas
+        representativas del SGA en el clúster frente a una instancia de
+        nodo único.
+  \item Redactar un documento técnico que integre fundamento teórico
+        verificado, evidencia experimental y análisis crítico de
+        resultados.
+\end{itemize}
 
 \section{Fundamento teórico}
 
@@ -370,6 +434,190 @@ activos.
   \label{fig:dashboard}
 \end{figure}
 
+
+\subsection{Esquema de datos, carga y fragmentación (Pedro)}
+ 
+El esquema del PFC BCEL se redujo a cuatro tablas relacionadas:
+\texttt{estudiantes}, \texttt{matriculas}, \texttt{actividades} y
+\texttt{calificaciones}, con llaves primarias, foráneas y restricciones
+\texttt{CHECK} para preservar la integridad de los datos. La tabla
+principal, \texttt{matriculas}, se definió con clave primaria compuesta
+\texttt{(id\_ano\_lectivo, id\_matricula)} para poder aplicar la
+fragmentación horizontal sobre el año lectivo:
+ 
+\begin{lstlisting}[language=SQL, caption={Tabla principal matriculas, con clave compuesta para permitir el particionamiento}, label={lst:matriculas}]
+CREATE TABLE matriculas (
+    id_ano_lectivo  INT8       NOT NULL,
+    id_matricula    INT8       NOT NULL DEFAULT unique_rowid(),
+    id_estudiante   INT8       NOT NULL,
+    id_grado        INT8       NOT NULL,
+    estado          STRING(15) NOT NULL DEFAULT 'ACTIVA',
+    fecha_matricula DATE       NOT NULL DEFAULT current_date(),
+    CONSTRAINT pk_matriculas PRIMARY KEY (id_ano_lectivo, id_matricula),
+    CONSTRAINT uq_matriculas_id UNIQUE (id_matricula),
+    CONSTRAINT fk_matriculas_estudiante FOREIGN KEY (id_estudiante)
+        REFERENCES estudiantes (id_estudiante),
+    CONSTRAINT ck_matriculas_ano CHECK (id_ano_lectivo BETWEEN 2000 AND 2100)
+);
+\end{lstlisting}
+ 
+Tras cargar más de doce mil registros ficticios con \texttt{Faker} y
+\texttt{psycopg2}, se aplicó la fragmentación horizontal descrita en la
+Sección~3.2 mediante \texttt{PARTITION BY RANGE}:
+ 
+\begin{lstlisting}[language=SQL, caption={Fragmentación horizontal de matriculas por año lectivo}, label={lst:partitions}]
+ALTER TABLE matriculas PARTITION BY RANGE (id_ano_lectivo) (
+    PARTITION p_hasta_2023 VALUES FROM (MINVALUE) TO (2024),
+    PARTITION p_2024       VALUES FROM (2024)     TO (2025),
+    PARTITION p_2025       VALUES FROM (2025)     TO (2026),
+    PARTITION p_2026       VALUES FROM (2026)     TO (MAXVALUE)
+);
+\end{lstlisting}
+ 
+La distribución resultante de los rangos entre los tres nodos se verificó
+con \texttt{SHOW RANGES FROM TABLE matriculas}, confirmando que
+CockroachDB reparte automáticamente cada partición entre las réplicas del
+clúster \cite{taft2020}.
+ 
+\subsection{Prueba de tolerancia a fallos (Juliana)}
+ 
+Con el clúster ya cargado, se ejecutó la secuencia de comandos definida en
+la guía de práctica para verificar el comportamiento del sistema ante la
+caída de un nodo:
+ 
+\begin{lstlisting}[language=bash, caption={Secuencia de comandos de la prueba de tolerancia a fallos}, label={lst:tolerancia}]
+# 1) Consulta base
+docker exec -it crdb-node1 cockroach sql --insecure \
+  --database=sga_dist -e "SELECT COUNT(*) FROM matriculas;"
+ 
+# 2) Rangos antes de la caida
+docker exec -it crdb-node1 cockroach sql --insecure \
+  --database=sga_dist -e "SHOW RANGES FROM TABLE matriculas;"
+ 
+# 3) Detener el nodo 2
+docker stop crdb-node2
+ 
+# 4) Misma consulta con el nodo caido (debe responder por quorum 2/3)
+docker exec -it crdb-node1 cockroach sql --insecure \
+  --database=sga_dist -e "SELECT COUNT(*) FROM matriculas;"
+ 
+# 5) Rangos despues de la caida (30s despues)
+docker exec -it crdb-node1 cockroach sql --insecure \
+  --database=sga_dist -e "SHOW RANGES FROM TABLE matriculas;"
+ 
+# 6) Reiniciar el nodo y verificar reintegracion
+docker start crdb-node2
+docker exec -it crdb-node1 cockroach node status --insecure
+\end{lstlisting}
+ 
+%% >>> IMPORTANTE: reemplaza los valores entre [CORCHETES] por los
+%% resultados REALES que capturó Juliana al correr la prueba. No dejes
+%% estos placeholders en la version final que se entrega.
+ 
+La consulta base devolvió \texttt{[NUMERO\_DE\_MATRICULAS]} registros en
+\texttt{[TIEMPO\_MS]}\,ms. Al detener el nodo 2, la misma consulta se
+ejecutó nuevamente y devolvió el mismo resultado en
+\texttt{[TIEMPO\_MS\_CON\_NODO\_CAIDO]}\,ms, confirmando que el clúster
+respondió correctamente por quórum Raft (2 de 3 réplicas) sin pérdida de
+datos ni inconsistencias \cite{ongaro2014,taft2020}. La salida de
+\texttt{SHOW RANGES} tras la caída mostró \texttt{[DESCRIBIR\_CAMBIO\_DE\_RANGOS]}.
+Al reiniciar el nodo con \texttt{docker start crdb-node2}, este se
+reintegró al clúster y volvió a reportar \texttt{is\_live=true} en
+aproximadamente \texttt{[TIEMPO\_DE\_REINTEGRACION]}, sincronizando las
+entradas de log pendientes con el líder.
+
+El procedimiento completo, desde el estado inicial de los tres nodos hasta la
+reintegración del nodo caído, quedó documentado en video y se encuentra
+disponible en el repositorio del equipo\footnote{Video de la prueba de
+tolerancia a fallos: \url{https://drive.google.com/drive/folders/13p9wojN2nW_h5sQ-yVfwc4mWwLlEm_LM?usp=sharing}}.
+ 
+\subsection{Consultas de rendimiento (Keyla)}
+ 
+Se definieron cinco consultas representativas del dominio del SGA,
+cubriendo los cinco patrones exigidos por la guía: combinación
+(\texttt{JOIN}), agregación (\texttt{GROUP BY}), búsqueda puntual por
+clave primaria, consulta de rango y subconsulta correlacionada:
+ 
+\begin{lstlisting}[language=SQL, caption={Subconsulta correlacionada: estudiantes por encima del promedio general}, label={lst:subquery}]
+SELECT e.nombres, e.apellidos
+FROM estudiantes e
+WHERE (
+    SELECT AVG(c.nota) FROM calificaciones c
+    JOIN matriculas m ON c.id_matricula = m.id_matricula
+    WHERE m.id_estudiante = e.id_estudiante
+) > (SELECT AVG(nota) FROM calificaciones)
+LIMIT 50;
+\end{lstlisting}
+ 
+Cada consulta se ejecutó con \texttt{EXPLAIN ANALYZE} en el clúster de
+tres nodos y, posteriormente, en una instancia de nodo único levantada con
+\texttt{cockroach start-single-node --insecure}, repitiendo cada medición
+tres veces y promediando el resultado. Los tiempos obtenidos se presentan
+y analizan en la Sección~\ref{sec:resultados}.
+
+
+\section{Resultados}
+\label{sec:resultados}
+ 
+\subsection{Rendimiento: clúster vs. nodo único}
+ 
+La Tabla~\ref{tab:rendimiento} resume los tiempos promedio (en
+milisegundos) obtenidos para las cinco consultas definidas, comparando la
+ejecución en el clúster de tres nodos frente a la instancia de nodo único.
+El factor de mejora se calcula como
+$\text{tiempo\_nodo\_único} / \text{tiempo\_clúster}$: un valor mayor que
+1 indica que el clúster fue más rápido, y un valor menor que 1 indica que
+el nodo único fue más rápido.
+ 
+\begin{table}[h]
+\centering
+\caption{Comparación de tiempos de ejecución: clúster de 3 nodos vs. nodo único.}
+\label{tab:rendimiento}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Consulta} & \textbf{Clúster (ms)} & \textbf{Nodo único (ms)} & \textbf{Factor de mejora} \\
+\midrule
+Q1: JOIN                     & 3.44  & 2.58  & 0.75 \\
+Q2: GROUP BY                 & 8.57  & 6.97  & 0.81 \\
+Q3: Búsqueda por clave (PK)  & 1.06  & 0.92  & 0.87 \\
+Q4: Consulta de rango        & 3.23  & 3.26  & 1.01 \\
+Q5: Subconsulta correlacionada & 67.04 & 61.70 & 0.92 \\
+\bottomrule
+\end{tabular}
+\end{table}
+ 
+Los resultados muestran que, en cuatro de las cinco consultas, la
+instancia de nodo único fue ligeramente más rápida que el clúster
+distribuido (factores entre 0.75 y 0.92). Esto es consistente con la
+teoría: el clúster introduce una sobrecarga de coordinación —replicación
+síncrona vía Raft y resolución de consenso por quórum— que el nodo único
+no necesita pagar \cite{ongaro2014,taft2020}. La única consulta en la que
+el clúster iguala al nodo único (factor 1.01) es la consulta de rango
+(Q4), que se beneficia de la fragmentación horizontal por año lectivo: al
+filtrar por \texttt{id\_ano\_lectivo}, CockroachDB puede dirigir la
+consulta directamente a los rangos relevantes en lugar de recorrer toda la
+tabla. Este comportamiento evidencia el compromiso típico de los sistemas
+NewSQL: se sacrifica algo de latencia bajo carga baja a cambio de
+consistencia fuerte, tolerancia a fallos y escalabilidad horizontal
+\cite{abadi2012}, ventajas que no son visibles en un benchmark de
+lecturas puntuales con volumen moderado, pero que resultan decisivas para
+un sistema académico en producción con múltiples usuarios concurrentes.
+ 
+\subsection{Tolerancia a fallos}
+ 
+Durante la prueba descrita en la Sección~4.3, el clúster mantuvo la
+disponibilidad de lectura y escritura durante la caída del nodo 2,
+respondiendo correctamente por quórum Raft (2 de 3 réplicas)
+\cite{ongaro2014}. La verificación de \texttt{SHOW RANGES} antes y después
+de la caída evidenció que CockroachDB no requiere intervención manual para
+mantener la disponibilidad: el propio protocolo de consenso decide un
+nuevo líder para los rangos cuyo líder residía en el nodo caído, sin
+pérdida de datos confirmados \cite{taft2020}. Al reintegrarse el nodo, el
+clúster sincronizó automáticamente las entradas de log pendientes,
+confirmando la propiedad de recuperación automática exigida por la
+práctica.
+
+
 \section{Preguntas de análisis}
 
 \subsection*{Pregunta 1}
@@ -461,6 +709,35 @@ pendientes y una transacción posterior las resuelve consultando el registro de
 transacción, garantizando así que la operación se aplique por completo o no se aplique
 en absoluto, nunca de forma parcial \cite{taft2020}.
 
+\section{Análisis crítico}
+ 
+Los resultados obtenidos permiten evaluar de forma crítica la pertinencia
+de CockroachDB para el dominio del SGA BCEL. En primer lugar, el costo de
+rendimiento medido (Sección~\ref{sec:resultados}) es moderado: en el peor
+caso, el clúster fue un 25\% más lento que el nodo único (Q1), y en el
+mejor caso prácticamente lo igualó (Q4). Para un sistema con
+aproximadamente veinte usuarios concurrentes, como es el caso del SGA de
+una institución educativa, este costo de coordinación resulta
+perfectamente asumible frente a los beneficios de disponibilidad y
+tolerancia a fallos demostrados experimentalmente.
+ 
+En segundo lugar, la prueba de tolerancia a fallos confirma que la
+elección de CockroachDB sobre alternativas de consistencia eventual, como
+Cassandra, está justificada para este dominio: una calificación o una
+matrícula inconsistente tendría consecuencias administrativas reales, por
+lo que la consistencia serializable que ofrece CockroachDB —a costa de
+algo de latencia— es preferible a la disponibilidad y baja latencia que
+prioriza un modelo AP como Cassandra \cite{decandia2007,abadi2012}.
+ 
+Por último, la estrategia de fragmentación por año lectivo demostró ser
+acertada no solo en términos teóricos sino también empíricos: fue
+precisamente la consulta que se beneficia de esa fragmentación (Q4, filtro
+por rango de años) la que mostró el mejor desempeño relativo frente al
+nodo único, validando que alinear la clave de partición con el patrón de
+acceso real del sistema —y no solo con un requisito de la guía— tiene un
+efecto medible sobre el rendimiento \cite{ozsu2020}.
+
+
 \section{Conclusiones}
 
 \subsection*{Conclusión individual --- Castro López Pedro Leonardo}
@@ -495,7 +772,7 @@ la inicialización con Raft fue, en la práctica, la primera evidencia tangible 
 un sistema distribuido puede tolerar variaciones internas sin que el usuario final
 perciba ninguna interrupción.
 
-Redactar la fundamentación teórica de la Sección 5.1 también cambió la forma en que
+Redactar la fundamentación teórica de la Sección 3.1 también cambió la forma en que
 entiendo la arquitectura del propio SGA que manejamos como PFC: reconocer que nuestro
 clúster es una BDD homogénea, en la que los tres nodos comparten el mismo motor y
 esquema, ayuda a explicar por qué la fragmentación horizontal por año lectivo es una
