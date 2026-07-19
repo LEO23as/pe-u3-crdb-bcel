@@ -88,6 +88,9 @@ docker exec -it crdb-node1 cockroach sql --insecure < sql/02_partitions.sql
 
 Dashboard disponible en `http://localhost:8080`.
 
+## Evidencia adicional
+- Video de la prueba de tolerancia a fallos: https://drive.google.com/drive/folders/13p9wojN2nW_h5sQ-yVfwc4mWwLlEm_LM?usp=sharing
+
 ## Estructura del repositorio
 
 ```
