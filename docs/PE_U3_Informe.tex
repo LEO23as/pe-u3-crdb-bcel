@@ -148,7 +148,52 @@ fragmentación horizontal aplicada por año lectivo como la replicación automá
 rangos que el propio motor gestiona entre nodos.
 
 \subsection{Fragmentación y replicación de datos}
-% TODO (Pedro): Teoria 5.2
+
+La fragmentación es el proceso de dividir una relación en subconjuntos más pequeños,
+denominados fragmentos, que se distribuyen entre los nodos de la base de datos
+distribuida \cite{ozsu2020}. Un esquema de fragmentación se considera correcto cuando
+satisface tres condiciones fundamentales. La \emph{completitud} exige que todo dato de
+la relación original pertenezca al menos a un fragmento; la \emph{reconstrucción}
+garantiza que la relación pueda recomponerse a partir de sus fragmentos mediante
+operadores del álgebra relacional; y la \emph{disjunción} asegura que, en el caso
+horizontal, ningún dato se repita entre fragmentos \cite{ozsu2020,kleppmann2017}.
+
+La fragmentación horizontal primaria divide una relación $R$ agrupando sus tuplas según
+predicados de selección $p_i$ definidos sobre sus propios atributos:
+\begin{equation}
+R_i = \sigma_{p_i}(R), \qquad i = 1, \dots, n.
+\end{equation}
+Para que el esquema sea correcto deben cumplirse la reconstrucción por unión y la
+disjunción entre fragmentos:
+\begin{align}
+R = \bigcup_{i=1}^{n} R_i, \qquad R_i \cap R_j = \emptyset \quad \forall\, i \neq j.
+\end{align}
+La fragmentación horizontal derivada, en cambio, fragmenta una relación $S$ en función
+de los fragmentos de otra relación $R$ con la que se relaciona, empleando el operador
+de semi-junta ($\ltimes$):
+\begin{equation}
+S_i = S \ltimes R_i.
+\end{equation}
+
+La fragmentación vertical descompone la relación por atributos mediante la proyección
+$\pi$, agrupando las columnas según su \emph{afinidad}, es decir, la frecuencia con que
+suelen consultarse juntas. Cada fragmento debe conservar la clave primaria para permitir
+la reconstrucción por junta natural: $R = R_1 \bowtie R_2 \bowtie \cdots \bowtie R_m$
+\cite{ozsu2020}. La fragmentación mixta o híbrida combina ambos enfoques, aplicando
+primero una división horizontal y luego vertical (o a la inversa), para adaptarse a
+patrones de acceso complejos.
+
+Respecto a la replicación, la propagación \emph{síncrona} confirma una escritura solo
+cuando todas las réplicas la han aplicado, lo que garantiza consistencia fuerte a costa
+de mayor latencia y de una menor disponibilidad ante la caída de una réplica. La
+replicación \emph{asíncrona}, por el contrario, confirma la escritura de inmediato y
+propaga los cambios después, mejorando la latencia y la disponibilidad pero admitiendo
+ventanas de consistencia eventual \cite{kleppmann2017}. Este compromiso entre
+consistencia, latencia y disponibilidad constituye una de las decisiones de diseño más
+importantes en una base de datos distribuida. En el SGA implementado, la tabla
+\texttt{matriculas} se fragmenta horizontalmente por año lectivo mediante selección
+sobre \texttt{id\_ano\_lectivo}, y CockroachDB replica cada fragmento en tres nodos con
+una estrategia de consenso que preserva la consistencia fuerte.
 
 \subsection{Control de concurrencia distribuido y consenso}
 En una base de datos distribuida, múltiples transacciones concurrentes pueden acceder
@@ -369,6 +414,29 @@ tolerancia a inconsistencias temporales —como registro de logs o telemetría�
 corresponden al perfil del SGA. Por tanto, la consistencia serializable de CockroachDB
 ofrece el equilibrio correcto entre integridad y rendimiento para este dominio.
 
+\subsection*{Pregunta 3}
+
+\textbf{Pregunta 3.} La fragmentación horizontal explícita de la tabla principal
+\texttt{matriculas} se implementa en CockroachDB mediante \texttt{PARTITION BY RANGE}
+sobre la columna \texttt{id\_ano\_lectivo}, seleccionada como clave de partición. Esta
+elección se justifica técnicamente: los datos académicos crecen de forma natural por
+año lectivo y la mayoría de las consultas del SGA filtran o agrupan por ese campo ---por
+ejemplo, las matrículas de un año determinado o los reportes anuales---, de modo que
+particionar por año alinea la distribución física de los datos con el patrón de acceso
+real, favoreciendo la localidad y reduciendo el número de nodos consultados. Formalmente,
+cada partición corresponde a una selección
+$R_i = \sigma_{a_i \le \texttt{id\_ano\_lectivo} < a_{i+1}}(\texttt{matriculas})$,
+cumpliendo las condiciones de completitud y disjunción. La estrategia definida crea
+rangos por año (hasta 2023, 2024, 2025 y 2026), de forma que CockroachDB ubica cada
+conjunto de matrículas en rangos independientes que el balanceador reparte entre los
+nodos del clúster. Como requisito técnico del motor, la columna de partición debe formar
+parte de la clave primaria; por ello la clave de \texttt{matriculas} es compuesta:
+\texttt{(id\_ano\_lectivo, id\_matricula)}. La verificación se realizó con
+\texttt{SHOW RANGES FROM TABLE matriculas}, cuya salida evidencia cómo los rangos quedan
+distribuidos entre los tres nodos, confirmando la transparencia de fragmentación. Esta
+estrategia mejora la escalabilidad y permite que las consultas acotadas por año lectivo
+accedan únicamente a la partición relevante.
+
 \subsection*{Pregunta 4}
 
 \textbf{Pregunta 4.} Cuando el SGA requiere una transacción que abarca varias tablas
@@ -394,6 +462,24 @@ transacción, garantizando así que la operación se aplique por completo o no s
 en absoluto, nunca de forma parcial \cite{taft2020}.
 
 \section{Conclusiones}
+
+\subsection*{Conclusión individual --- Castro López Pedro Leonardo}
+
+Al encargarme del esquema de datos y de la fragmentación, esta práctica me ayudó a
+entender que diseñar una base distribuida no es lo mismo que diseñar una centralizada.
+Al crear las cuatro tablas ---estudiantes, matrículas, actividades y calificaciones---
+con sus claves primarias, foráneas y restricciones CHECK, me topé con un detalle que en
+teoría pasa desapercibido: para poder particionar la tabla \texttt{matriculas} por
+\texttt{id\_ano\_lectivo}, esa columna tenía que formar parte de la clave primaria, por
+lo que tuve que definir una clave compuesta. Ese pequeño obstáculo me hizo comprender que
+la fragmentación no es un adorno, sino una decisión que condiciona todo el modelo de
+datos. Cargar más de doce mil matrículas ficticias con \texttt{faker} y \texttt{psycopg2}
+me permitió ver, con datos de por medio, cómo CockroachDB reparte automáticamente la
+información en rangos entre los nodos; al ejecutar \texttt{SHOW RANGES} confirmé que la
+distribución realmente ocurría y no era solo teoría. En conjunto, aprendí a traducir el
+concepto formal de fragmentación horizontal ---la selección $\sigma_{p_i}(R)$ que estudié
+en clase--- a una implementación concreta y verificable, y ahora valoro por qué elegir
+bien la clave de partición es determinante para el rendimiento del sistema.
 
 \subsection*{Conclusión individual --- Vinueza Sánchez Harold Nicolás}
 
